@@ -1,0 +1,148 @@
+name: Test and deploy
+
+# Push to main:
+#   1. check            typecheck + unit tests (also runs on pull requests)
+#   2. marketplace      ScopeGuard (Marketplace app, manifest.yml) → Forge `development`
+#   3. dash-internal    ScopeGuard (Dash) clone → Forge `production` on dashtech
+#                       runs ONLY after the Marketplace deploy succeeded (needs: marketplace)
+# Marketplace production releases are separate: see release-marketplace.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: forge-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORGE_CLI: '@forge/cli@15'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck and test
+        run: npm run ci
+      - name: Generate the Dash edition manifest (dry run)
+        run: node scripts/make-edition-manifest.mjs editions/dash-internal.json /tmp/manifest.dash.yml
+
+  marketplace:
+    name: Deploy Marketplace app (development)
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: development
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+      # Optional test site for the Marketplace app. Leave unset to deploy without installing,
+      # so dashtech only runs the Dash edition.
+      TEST_SITE: ${{ vars.MARKETPLACE_TEST_SITE }}
+    steps:
+      - name: Check Forge credentials
+        run: |
+          if [ -z "$FORGE_EMAIL" ] || [ -z "$FORGE_API_TOKEN" ]; then
+            echo "::error::FORGE_EMAIL / FORGE_API_TOKEN repository secrets are not set."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies and Forge CLI
+        run: |
+          npm ci
+          npm install -g "$FORGE_CLI"
+          forge settings set usage-analytics false
+      - name: Lint
+        run: forge lint -e development
+      - name: Deploy
+        run: |
+          set +e
+          forge deploy -e development --non-interactive 2>&1 | tee deploy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -v '^\s*$' deploy.log | tail -n 15 | while IFS= read -r line; do echo "::error title=forge deploy (marketplace)::${line//%/%25}"; done
+          fi
+          exit "$status"
+      - name: Install or upgrade on the test site
+        if: env.TEST_SITE != ''
+        run: |
+          set +e
+          forge install --upgrade --site "$TEST_SITE" --product jira -e development --non-interactive --confirm-scopes 2>&1 | tee install.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            forge install --site "$TEST_SITE" --product jira -e development --non-interactive --confirm-scopes 2>&1 | tee install.log
+            status=${PIPESTATUS[0]}
+          fi
+          if [ "$status" -ne 0 ]; then
+            grep -v '^\s*$' install.log | tail -n 15 | while IFS= read -r line; do echo "::error title=forge install (marketplace)::${line//%/%25}"; done
+          fi
+          exit "$status"
+
+  dash-internal:
+    name: Deploy Dash internal clone (production)
+    needs: marketplace
+    runs-on: ubuntu-latest
+    environment: dash-internal
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies and Forge CLI
+        run: |
+          npm ci
+          npm install -g "$FORGE_CLI"
+          forge settings set usage-analytics false
+      - name: Switch manifest to the Dash edition
+        run: node scripts/make-edition-manifest.mjs editions/dash-internal.json
+      - name: Read edition settings
+        id: edition
+        run: |
+          echo "env=$(node -p "require('./editions/dash-internal.json').environment")" >> "$GITHUB_OUTPUT"
+          echo "site=$(node -p "process.env.DASH_SITE || require('./editions/dash-internal.json').site")" >> "$GITHUB_OUTPUT"
+        env:
+          DASH_SITE: ${{ vars.DASH_SITE }}
+      - name: Lint
+        run: forge lint -e "${{ steps.edition.outputs.env }}"
+      - name: Deploy
+        run: |
+          set +e
+          forge deploy -e "${{ steps.edition.outputs.env }}" --non-interactive 2>&1 | tee deploy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -v '^\s*$' deploy.log | tail -n 15 | while IFS= read -r line; do echo "::error title=forge deploy (dash)::${line//%/%25}"; done
+          fi
+          exit "$status"
+      - name: Install or upgrade on dashtech
+        env:
+          ENV_NAME: ${{ steps.edition.outputs.env }}
+          SITE: ${{ steps.edition.outputs.site }}
+        run: |
+          set +e
+          # Upgrade succeeds when already installed (and applies scope changes); otherwise install fresh.
+          forge install --upgrade --site "$SITE" --product jira -e "$ENV_NAME" --non-interactive --confirm-scopes 2>&1 | tee install.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            forge install --site "$SITE" --product jira -e "$ENV_NAME" --non-interactive --confirm-scopes 2>&1 | tee install.log
+            status=${PIPESTATUS[0]}
+          fi
+          if [ "$status" -ne 0 ]; then
+            grep -v '^\s*$' install.log | tail -n 15 | while IFS= read -r line; do echo "::error title=forge install (dash)::${line//%/%25}"; done
+          fi
+          exit "$status"

@@ -1,0 +1,64 @@
+modules:
+  # Fires on every issue update/creation; the handler ignores events that
+  # do not touch the Sprint field. ignoreSelf stops our own label/comment
+  # writes from re-triggering the app.
+  trigger:
+    - key: scopeguard-issue-events
+      function: issue-events
+      events:
+        - avi:jira:updated:issue
+        - avi:jira:created:issue
+      filter:
+        ignoreSelf: true
+
+  jira:issuePanel:
+    - key: scopeguard-issue-panel
+      resource: issue-panel
+      resolver:
+        function: resolver
+      render: native
+      title: ScopeGuard
+      icon: resource:static-assets;icon.svg
+
+  jira:projectPage:
+    - key: scopeguard-project-page
+      resource: project-page
+      resolver:
+        function: resolver
+      render: native
+      title: ScopeGuard
+      icon: resource:static-assets;icon.svg
+
+  function:
+    - key: resolver
+      handler: resolvers/index.handler
+    - key: issue-events
+      handler: triggers/issueUpdated.handler
+
+resources:
+  - key: issue-panel
+    path: src/frontend/issuePanel.tsx
+  - key: project-page
+    path: src/frontend/projectPage.tsx
+  - key: static-assets
+    path: static
+
+permissions:
+  scopes:
+    # Classic scopes: issues, fields, labels, comments, mypermissions
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user
+    # Jira Software (agile) granular scopes: sprints and boards
+    - read:sprint:jira-software
+    - read:board-scope:jira-software
+    - read:issue-details:jira
+    - read:jql:jira
+    - read:project:jira
+    # Forge KVS
+    - storage:app
+
+app:
+  runtime:
+    name: nodejs22.x
+  id: ari:cloud:ecosystem::app/a0d4fe36-6fe6-4769-bb22-bf862feb520a

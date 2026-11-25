@@ -1,0 +1,49 @@
+name: Release Marketplace app (production)
+
+# Promotes the Marketplace edition (manifest.yml as committed) to Forge `production`.
+# Runs on demand or when a version tag (v1.2.3) is pushed, behind the `production`
+# environment, so add a required reviewer there in GitHub → Settings → Environments.
+# No install step: customers install from the Marketplace listing, and existing
+# installations pick up each production deploy.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: forge-release-marketplace
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck and test
+        run: npm run ci
+      - name: Install Forge CLI
+        run: |
+          npm install -g @forge/cli@15
+          forge settings set usage-analytics false
+      - name: Lint
+        run: forge lint -e production
+      - name: Deploy to production
+        run: |
+          set +e
+          forge deploy -e production --non-interactive 2>&1 | tee deploy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -v '^\s*$' deploy.log | tail -n 15 | while IFS= read -r line; do echo "::error title=forge deploy (marketplace production)::${line//%/%25}"; done
+          fi
+          exit "$status"
+      - name: Note
+        run: echo "::notice title=ScopeGuard::Marketplace edition deployed to production. Sites install it from the Marketplace listing."
